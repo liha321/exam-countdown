@@ -4,8 +4,8 @@
 - 无边框 / 置顶 / 透明背景
 - 圆角卡片 + 投影 + 高光 + 秒针脉冲 + 淡入动画
 - 顶部胶囊（或 Tab 键）切换中考 / 高考
-- 右键菜单打开「设置考试时间」，保存到同目录 config.json
-- 鼠标左键拖动移动；右键菜单退出；ESC 退出
+- 右键菜单：设置考试时间(F2)、尺寸(小/中/大)、退出
+- 时间与尺寸保存到同目录 config.json
 - 纯标准库，无需 pip 安装任何依赖
 """
 
@@ -15,14 +15,13 @@ from datetime import datetime
 import sys, os, json
 
 # ==================== 默认配置（首次运行或无 config.json 时使用） ====================
-DEFAULT_ZK = datetime(2027, 6, 20, 9, 0, 0)   # 中考开考时间
-DEFAULT_GK = datetime(2030, 6, 7, 9, 0, 0)    # 高考开考时间
-DEFAULT_EXAM = "zk"                            # 启动默认："zk" 中考 / "gk" 高考
+DEFAULT_ZK = datetime(2027, 6, 20, 9, 0, 0)
+DEFAULT_GK = datetime(2030, 6, 7, 9, 0, 0)
+DEFAULT_EXAM = "zk"
+DEFAULT_SIZE = "m"
 
-# 窗口初始位置（距屏幕左 / 上像素）
 INIT_X, INIT_Y = 200, 200
 
-# 配色
 COLOR_CARD      = "#1B1B2F"
 COLOR_CARD_EDGE = "#33334F"
 COLOR_SHADOW    = "#0A0A12"
@@ -31,18 +30,18 @@ COLOR_NUM       = "#FFFFFF"
 COLOR_UNIT      = "#8E8EA8"
 COLOR_DONE      = "#00E676"
 
-# 两种考试强调色
 ACCENT = {"zk": "#00E5FF", "gk": "#FFB74D"}
 
 FONT_UI_PREFS  = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei"]
 FONT_NUM_PREFS = ["Consolas", "SF Mono", "Menlo", "DejaVu Sans Mono", "Courier New"]
 SIZE_TITLE, SIZE_NUM, SIZE_UNIT, SIZE_TAB = 11, 30, 12, 10
 
+# 三档尺寸：键 -> (显示名, 缩放比例)
+SIZES = {"s": ("小", 0.82), "m": ("中", 1.0), "l": ("大", 1.22)}
+
 TRANSPARENT_COLOR = "#010203"
 CARD_W, CARD_H, CARD_GAP = 92, 86, 14
 LEFT, TOP = 25, 68
-WIN_W = LEFT * 2 + 4 * CARD_W + 3 * CARD_GAP
-WIN_H = TOP + CARD_H + 10
 
 # ==================== 配置文件（EXE 同目录 / 脚本同目录 config.json） ====================
 def base_dir():
@@ -54,20 +53,23 @@ CONFIG_PATH = os.path.join(base_dir(), "config.json")
 TIME_FMT = "%Y-%m-%d %H:%M"
 
 def load_config():
-    exams = {"zk": DEFAULT_ZK, "gk": DEFAULT_GK}
+    cfg = {"zk": DEFAULT_ZK, "gk": DEFAULT_GK, "size": DEFAULT_SIZE}
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             raw = json.load(f)
         for k in ("zk", "gk"):
             if raw.get(k):
-                exams[k] = datetime.strptime(raw[k].strip(), TIME_FMT)
+                cfg[k] = datetime.strptime(raw[k].strip(), TIME_FMT)
+        if raw.get("size") in SIZES:
+            cfg["size"] = raw["size"]
     except Exception:
         pass
-    return exams
+    return cfg
 
-def save_config(exams):
+def save_config(exams, size):
     try:
         data = {k: exams[k].strftime(TIME_FMT) for k in ("zk", "gk")}
+        data["size"] = size
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
@@ -103,14 +105,13 @@ class CountdownApp:
         self._offset = (0, 0)
         self._press_xy = (0, 0)
         self.current_exam = DEFAULT_EXAM
-        self.exams = load_config()
+
+        cfg = load_config()
+        self.exams = {"zk": cfg["zk"], "gk": cfg["gk"]}
+        self.size = cfg["size"]
+        self.size_var = tk.StringVar(value=self.size)
         self.exam_datetime = self.exams[self.current_exam]
         self.accent = ACCENT[self.current_exam]
-
-        self.font_title = (pick_font(FONT_UI_PREFS), SIZE_TITLE, "bold")
-        self.font_num   = (pick_font(FONT_NUM_PREFS), SIZE_NUM, "bold")
-        self.font_unit  = (pick_font(FONT_UI_PREFS), SIZE_UNIT, "bold")
-        self.font_tab  = (pick_font(FONT_UI_PREFS), SIZE_TAB, "bold")
 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -119,56 +120,105 @@ class CountdownApp:
             self.root.attributes("-transparentcolor", TRANSPARENT_COLOR)
         except tk.TclError:
             self.root.attributes("-alpha", 0.95)
-        self.root.geometry(f"{WIN_W}x{WIN_H}+{INIT_X}+{INIT_Y}")
 
-        self.canvas = tk.Canvas(self.root, width=WIN_W, height=WIN_H,
-                                bg=TRANSPARENT_COLOR, highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(self.root, bg=TRANSPARENT_COLOR,
+                                highlightthickness=0, bd=0)
         self.canvas.pack()
 
-        self._build()
         self._bind_events()
-        self._apply_exam()
+        self._apply_size()
+        self.root.geometry(f"+{INIT_X}+{INIT_Y}")
         self._fade_in(0.0)
         self._tick()
 
+    # ---------------- 尺寸与布局 ----------------
+    def _metrics(self, sc):
+        return {
+            "card_w": round(CARD_W * sc),
+            "card_h": round(CARD_H * sc),
+            "gap": round(CARD_GAP * sc),
+            "left": round(LEFT * sc),
+            "top": round(TOP * sc),
+            "win_w": round(LEFT * 2 * sc + 4 * CARD_W * sc + 3 * CARD_GAP * sc),
+            "win_h": round(TOP * sc + CARD_H * sc + 10 * sc),
+            "tab_w": round(58 * sc),
+            "tab_h": round(22 * sc),
+            "tab_r": round(11 * sc),
+            "tab_y": round(16 * sc),
+            "title_y": round(44 * sc),
+            "num_y": round(30 * sc),
+            "unit_y": round(66 * sc),
+            "tab_dx": round(33 * sc),
+            "fs_title": max(8, round(SIZE_TITLE * sc)),
+            "fs_num": max(14, round(SIZE_NUM * sc)),
+            "fs_unit": max(9, round(SIZE_UNIT * sc)),
+            "fs_tab": max(8, round(SIZE_TAB * sc)),
+        }
+
+    def _apply_size(self):
+        sc = SIZES[self.size][1]
+        self.m = self._metrics(sc)
+        self.font_title = (pick_font(FONT_UI_PREFS), self.m["fs_title"], "bold")
+        self.font_num   = (pick_font(FONT_NUM_PREFS), self.m["fs_num"], "bold")
+        self.font_unit  = (pick_font(FONT_UI_PREFS), self.m["fs_unit"], "bold")
+        self.font_tab   = (pick_font(FONT_UI_PREFS), self.m["fs_tab"], "bold")
+        self.root.geometry(f"{self.m['win_w']}x{self.m['win_h']}")
+        self.canvas.config(width=self.m["win_w"], height=self.m["win_h"],
+                           bg=TRANSPARENT_COLOR)
+        self.canvas.delete("all")
+        self._build()
+        self._apply_exam()
+        self._render()
+
+    def set_size(self, key):
+        if key == self.size or key not in SIZES:
+            return
+        self.size = key
+        self.size_var.set(key)
+        self._apply_size()
+        save_config(self.exams, self.size)
+
     # ---------------- 界面构建 ----------------
     def _build(self):
+        m = self.m
+        cx0 = m["win_w"] // 2
         self.tab_items = {}
-        for key, label, cx in (
-            ("zk", "中考", WIN_W // 2 - 33),
-            ("gk", "高考", WIN_W // 2 + 33),
-        ):
-            w, h = 58, 22
-            x1, y1 = cx - w // 2, 16 - h // 2
-            x2, y2 = cx + w // 2, 16 + h // 2
-            rect = round_rect(self.canvas, x1, y1, x2, y2, 11,
+        for key, label, dx in (("zk", "中考", -m["tab_dx"]), ("gk", "高考", m["tab_dx"])):
+            cx = cx0 + dx
+            x1, y1 = cx - m["tab_w"] // 2, m["tab_y"] - m["tab_h"] // 2
+            x2, y2 = cx + m["tab_w"] // 2, m["tab_y"] + m["tab_h"] // 2
+            rect = round_rect(self.canvas, x1, y1, x2, y2, m["tab_r"],
                               fill=COLOR_CARD, outline=COLOR_CARD_EDGE, width=1)
-            text = self.canvas.create_text(cx, 16, text=label, fill=COLOR_UNIT, font=self.font_tab)
+            text = self.canvas.create_text(cx, m["tab_y"], text=label,
+                                           fill=COLOR_UNIT, font=self.font_tab)
             self.tab_items[key] = (rect, text)
             for item in (rect, text):
                 self.canvas.tag_bind(item, "<ButtonRelease-1>",
                                      lambda e, k=key: self._on_tab_click(e, k))
 
         self.title_item = self.canvas.create_text(
-            WIN_W // 2, 44, text="", fill=self.accent, font=self.font_title)
+            cx0, m["title_y"], text="", fill=self.accent, font=self.font_title)
 
         units = ["天", "时", "分", "秒"]
         self.num_items = []
+        sh, sv = round(3 * (m["card_w"] / CARD_W)), round(4 * (m["card_h"] / CARD_H))
+        rad = round(16 * (m["card_w"] / CARD_W))
         for i, unit in enumerate(units):
-            x1 = LEFT + i * (CARD_W + CARD_GAP)
-            x2 = x1 + CARD_W
-            y1, y2 = TOP, TOP + CARD_H
+            x1 = m["left"] + i * (m["card_w"] + m["gap"])
+            x2 = x1 + m["card_w"]
+            y1, y2 = m["top"], m["top"] + m["card_h"]
             cx = (x1 + x2) // 2
-            round_rect(self.canvas, x1 + 3, y1 + 4, x2 + 3, y2 + 4, 16,
+            round_rect(self.canvas, x1 + sh, y1 + sv, x2 + sh, y2 + sv, rad,
                        fill=COLOR_SHADOW, outline="")
-            round_rect(self.canvas, x1, y1, x2, y2, 16,
+            round_rect(self.canvas, x1, y1, x2, y2, rad,
                        fill=COLOR_CARD, outline=COLOR_CARD_EDGE, width=1)
-            self.canvas.create_line(x1 + 16, y1 + 1, x2 - 16, y1 + 1,
+            self.canvas.create_line(x1 + round(16*m["card_w"]/CARD_W), y1 + 1,
+                                    x2 - round(16*m["card_w"]/CARD_W), y1 + 1,
                                     fill=COLOR_HILIGHT, width=2)
-            it = self.canvas.create_text(cx, y1 + 30, text="00",
+            it = self.canvas.create_text(cx, y1 + m["num_y"], text="00",
                                          fill=COLOR_NUM, font=self.font_num)
             self.num_items.append(it)
-            self.canvas.create_text(cx, y1 + 66, text=unit,
+            self.canvas.create_text(cx, y1 + m["unit_y"], text=unit,
                                     fill=COLOR_UNIT, font=self.font_unit)
 
     # ---------------- 事件绑定 ----------------
@@ -194,6 +244,15 @@ class CountdownApp:
         menu = tk.Menu(self.root, tearoff=0, bg=COLOR_CARD, fg=COLOR_NUM,
                        activebackground=ACCENT[self.current_exam], activeforeground="#0F0F1A")
         menu.add_command(label="设置考试时间 (F2)", command=self.open_settings)
+
+        size_menu = tk.Menu(menu, tearoff=0, bg=COLOR_CARD, fg=COLOR_NUM,
+                            activebackground=ACCENT[self.current_exam], activeforeground="#0F0F1A")
+        for key, (label, _sc) in SIZES.items():
+            size_menu.add_radiobutton(label=label, value=key,
+                                     variable=self.size_var,
+                                     command=lambda k=key: self.set_size(k))
+        menu.add_cascade(label="尺寸", menu=size_menu)
+
         menu.add_separator()
         menu.add_command(label="退出", command=self.root.destroy)
         menu.tk_popup(e.x_root, e.y_root)
@@ -279,7 +338,7 @@ class CountdownApp:
             self.exam_datetime = new[self.current_exam]
             self._done = False
             self._last_sec = -1
-            save_config(new)
+            save_config(new, self.size)
             self._apply_exam()
             self._render()
             win.destroy()
