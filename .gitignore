@@ -1,0 +1,8 @@
+# PyInstaller 打包中间产物
+build/
+*.spec
+__pycache__/
+*.pyc
+
+# 单文件 EXE 产物目录（如需把 exe 纳入仓库，可手动放行）
+dist/
